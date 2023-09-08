@@ -42,6 +42,12 @@
 #define	PLSR_USB_HS			0x02
 #define	PLSR_USB_SS			0x04
 
+/* Chip status register */
+#define	AXGE_CSR		0x05
+#define	AXGE_VERSION_AX88179A	6
+#define	AXGE_CHIP_CODE_MASK	0x70
+#define	AXGE_CHIP_CODE(x)	((x & AXGE_CHIP_CODE_MASK) >> 4)
+
 /* EEPROM address register */
 #define	AXGE_EAR			0x07
 
@@ -202,6 +208,7 @@ struct axge_softc {
 
 	int			sc_flags;
 #define	AXGE_FLAG_LINK		0x0001	/* got a link */
+#define	AXGE_FLAG_179A		0x0002  /* AX88179A */
 };
 
 #define	AXGE_LOCK(_sc)			mtx_lock(&(_sc)->sc_mtx)

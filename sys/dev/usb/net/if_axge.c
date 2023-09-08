@@ -403,6 +403,12 @@ done:
 static void
 axge_chip_init(struct axge_softc *sc)
 {
+	uint8_t status;
+
+	status = axge_read_cmd_1(sc, AXGE_ACCESS_MAC, AXGE_CSR);
+	if (AXGE_CHIP_CODE(status) == AXGE_VERSION_AX88179A)
+		sc->sc_flags |= AXGE_FLAG_179A;
+
 	/* Power up ethernet PHY. */
 	axge_write_cmd_2(sc, AXGE_ACCESS_MAC, 2, AXGE_EPPRCR, 0);
 	axge_write_cmd_2(sc, AXGE_ACCESS_MAC, 2, AXGE_EPPRCR, EPPRCR_IPRL);
@@ -939,12 +945,16 @@ axge_ioctl(if_t ifp, u_long cmd, caddr_t data)
 static void
 axge_rx_frame(struct usb_ether *ue, struct usb_page_cache *pc, int actlen)
 {
+	struct axge_softc *sc;
 	struct axge_frame_rxhdr pkt_hdr;
 	uint32_t rxhdr;
 	uint32_t pos;
 	uint32_t pkt_cnt, pkt_end;
 	uint32_t hdr_off;
+	uint32_t hdr_stride;
 	uint32_t pktlen;
+
+	sc = uether_getsc(ue);
 
 	/* verify we have enough data */
 	if (actlen < (int)sizeof(rxhdr))
@@ -957,6 +967,23 @@ axge_rx_frame(struct usb_ether *ue, struct usb_page_cache *pc, int actlen)
 
 	pkt_cnt = rxhdr & 0xFFFF;
 	hdr_off = pkt_end = (rxhdr >> 16) & 0xFFFF;
+
+	hdr_stride = sizeof(pkt_hdr);
+
+	/*
+	 * If AX88179A chip, RX frame headers would be 8 bytes wide if
+	 * chip was set to 179A fw mode. Since driver doesn't do that,
+	 * chip operates with 4 bytes wide frame headers, doubles the
+	 * packet count, and inserts additional frame headers as
+	 * padding. The padding headers have their drop bit set and 0
+	 * packet length. So we can increase our stride through the
+	 * headers section and divide the packet count by 2 so as not
+	 * to misreport on if stats.
+	 */
+	if (sc->sc_flags & AXGE_FLAG_179A) {
+		hdr_stride += sizeof(pkt_hdr);
+		pkt_cnt /= 2;
+	}
 
 	/*
 	 * <----------------------- actlen ------------------------>
@@ -989,7 +1016,7 @@ axge_rx_frame(struct usb_ether *ue, struct usb_page_cache *pc, int actlen)
 		} else
 			axge_rxeof(ue, pc, pos, pktlen, pkt_hdr.status);
 		pos += (pktlen + 7) & ~7;
-		hdr_off += sizeof(pkt_hdr);
+		hdr_off += hdr_stride;
 	}
 }
 
