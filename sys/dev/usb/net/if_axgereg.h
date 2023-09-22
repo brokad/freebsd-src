@@ -155,7 +155,8 @@ enum {
 	AXGE_N_TRANSFER,
 };
 
-#define	AXGE_N_FRAMES	16
+#define	AXGE_WR_BUFSZ	(16 * 1024)
+#define	AXGE_RD_BUFSZ	(48 * 1024)
 
 struct axge_frame_txhdr {
 	uint32_t		len;
@@ -169,6 +170,8 @@ struct axge_frame_txhdr {
 } __packed;
 
 #define	AXGE_TXBYTES(x)		((x) & AXGE_TXLEN_MASK)
+#define	AXGE_TXPKTHDR_SIZE	sizeof(struct axge_frame_txhdr)
+#define	AXGE_TXPKT_SIZE(m)	(AXGE_TXPKTHDR_SIZE + m->m_pkthdr.len)
 
 #define	AXGE_PHY_ADDR		3
 

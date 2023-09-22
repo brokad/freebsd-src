@@ -155,8 +155,7 @@ static const struct usb_config axge_config[AXGE_N_TRANSFER] = {
 		.type = UE_BULK,
 		.endpoint = UE_ADDR_ANY,
 		.direction = UE_DIR_OUT,
-		.frames = AXGE_N_FRAMES,
-		.bufsize = AXGE_N_FRAMES * MCLBYTES,
+		.bufsize = AXGE_WR_BUFSZ,
 		.flags = {.pipe_bof = 1,.force_short_xfer = 1,},
 		.callback = axge_bulk_write_callback,
 		.timeout = 10000,	/* 10 seconds */
@@ -165,7 +164,7 @@ static const struct usb_config axge_config[AXGE_N_TRANSFER] = {
 		.type = UE_BULK,
 		.endpoint = UE_ADDR_ANY,
 		.direction = UE_DIR_IN,
-		.bufsize = 65536,
+		.bufsize = AXGE_RD_BUFSZ,
 		.flags = {.pipe_bof = 1,.short_xfer_ok = 1,},
 		.callback = axge_bulk_read_callback,
 		.timeout = 0,		/* no timeout */
@@ -679,7 +678,7 @@ axge_bulk_write_callback(struct usb_xfer *xfer, usb_error_t error)
 	struct usb_page_cache *pc;
 	struct mbuf *m;
 	struct axge_frame_txhdr txhdr;
-	int nframes, pos;
+	uint32_t pkt_cnt, pkt_len, max_len, pos;
 
 	sc = usbd_xfer_softc(xfer);
 	ifp = uether_getifp(&sc->sc_ue);
@@ -699,25 +698,38 @@ tr_setup:
 			return;
 		}
 
-		for (nframes = 0; nframes < AXGE_N_FRAMES &&
-		    !if_sendq_empty(ifp); nframes++) {
-			m = if_dequeue(ifp);
-			if (m == NULL)
-				break;
-			usbd_xfer_set_frame_offset(xfer, nframes * MCLBYTES,
-			    nframes);
-			pc = usbd_xfer_get_frame(xfer, nframes);
+		usbd_xfer_set_frame_offset(xfer, 0, 0);
+		pc = usbd_xfer_get_frame(xfer, 0);
+
+		pos = 0;
+		pkt_cnt = 0;
+		max_len = usbd_xfer_max_len(xfer);
+
+		while ((m = if_dequeue(ifp)) != NULL &&
+		       pos + AXGE_TXPKT_SIZE(m) <= max_len) {
+			pkt_len = m->m_pkthdr.len;
+
 			txhdr.mss = 0;
-			txhdr.len = htole32(AXGE_TXBYTES(m->m_pkthdr.len));
+			txhdr.len = AXGE_TXBYTES(pkt_len);
 			if ((if_getcapenable(ifp) & IFCAP_TXCSUM) != 0 &&
 			    (m->m_pkthdr.csum_flags & AXGE_CSUM_FEATURES) == 0)
-				txhdr.len |= htole32(AXGE_CSUM_DISABLE);
+				txhdr.len |= AXGE_CSUM_DISABLE;
 
-			pos = 0;
-			usbd_copy_in(pc, pos, &txhdr, sizeof(txhdr));
-			pos += sizeof(txhdr);
-			usbd_m_copy_in(pc, pos, m, 0, m->m_pkthdr.len);
-			pos += m->m_pkthdr.len;
+			txhdr.len = htole32(txhdr.len);
+
+			usbd_copy_in(pc, pos, &txhdr, AXGE_TXPKTHDR_SIZE);
+			pos += AXGE_TXPKTHDR_SIZE;
+
+			usbd_m_copy_in(pc, pos, m, 0, pkt_len);
+			pos += pkt_len;
+
+			/* Alignment for next tx frame. */
+			pos = (pos + 3) & ~3;
+
+			if (pos > max_len)
+				pos = max_len;
+
+			pkt_cnt++;
 
 			/*
 			 * if there's a BPF listener, bounce a copy
@@ -726,11 +738,15 @@ tr_setup:
 			BPF_MTAP(ifp, m);
 
 			m_freem(m);
-
-			/* Set frame length. */
-			usbd_xfer_set_frame_len(xfer, nframes, pos);
 		}
-		if (nframes != 0) {
+
+		if (m != NULL) {
+			/* Ran out of space in this frame. */
+			if_sendq_prepend(ifp, m);
+			m = NULL;
+		}
+
+		if (pkt_cnt > 0) {
 			/*
 			 * XXX
 			 * Update TX packet counter here. This is not
@@ -740,8 +756,9 @@ tr_setup:
 			 * multiple writes into single one if there is
 			 * room in TX buffer of controller.
 			 */
-			if_inc_counter(ifp, IFCOUNTER_OPACKETS, nframes);
-			usbd_xfer_set_frames(xfer, nframes);
+			if_inc_counter(ifp, IFCOUNTER_OPACKETS, pkt_cnt);
+			usbd_xfer_set_frames(xfer, 1);
+			usbd_xfer_set_frame_len(xfer, 0, pos);
 			usbd_transfer_submit(xfer);
 			if_setdrvflagbits(ifp, IFF_DRV_OACTIVE, 0);
 		}
