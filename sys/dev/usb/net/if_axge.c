@@ -140,6 +140,10 @@ static void	axge_rxeof(struct usb_ether *, struct usb_page_cache *,
 static void	axge_csum_cfg(struct usb_ether *);
 
 #define	AXGE_CSUM_FEATURES	(CSUM_IP | CSUM_TCP | CSUM_UDP)
+#define	AXGE_CAP		\
+	    IFCAP_VLAN_MTU | IFCAP_TXCSUM | IFCAP_RXCSUM | IFCAP_JUMBO_MTU
+#define	AXGE_CAP_ENABLE	\
+	    IFCAP_VLAN_MTU | IFCAP_TXCSUM | IFCAP_RXCSUM
 
 #ifdef USB_DEBUG
 static int axge_debug = 0;
@@ -376,6 +380,8 @@ axge_miibus_statchg(device_t dev)
 	switch (IFM_SUBTYPE(mii->mii_media_active)) {
 	case IFM_1000_T:
 		val |= MSR_GM | MSR_EN_125MHZ;
+		if (if_getmtu(ifp) > ETHERMTU)
+			val |= MSR_JE;
 		if (link_status & PLSR_USB_SS)
 			memcpy(tmp, &axge_bulk_size[0], 5);
 		else if (link_status & PLSR_USB_HS)
@@ -479,9 +485,9 @@ axge_attach_post_sub(struct usb_ether *ue)
 	if_setsendqlen(ifp, ifqmaxlen);
 	if_setsendqready(ifp);
 
-	if_setcapabilitiesbit(ifp, IFCAP_VLAN_MTU | IFCAP_TXCSUM | IFCAP_RXCSUM, 0);
+	if_setcapabilitiesbit(ifp, AXGE_CAP, 0);
 	if_sethwassist(ifp, AXGE_CSUM_FEATURES);
-	if_setcapenable(ifp, if_getcapabilities(ifp));
+	if_setcapenable(ifp, AXGE_CAP_ENABLE);
 
 	bus_topo_lock();
 	error = mii_attach(ue->ue_dev, &ue->ue_miibus, ifp,
@@ -946,7 +952,8 @@ axge_ioctl(if_t ifp, u_long cmd, caddr_t data)
 	ifr = (struct ifreq *)data;
 	error = 0;
 	reinit = 0;
-	if (cmd == SIOCSIFCAP) {
+	switch (cmd) {
+	case SIOCSIFCAP:
 		AXGE_LOCK(sc);
 		mask = ifr->ifr_reqcap ^ if_getcapenable(ifp);
 		if ((mask & IFCAP_TXCSUM) != 0 &&
@@ -968,10 +975,34 @@ axge_ioctl(if_t ifp, u_long cmd, caddr_t data)
 		else
 			reinit = 0;
 		AXGE_UNLOCK(sc);
-		if (reinit > 0)
-			uether_init(ue);
-	} else
+		break;
+	case SIOCSIFMTU:
+		if (ifr->ifr_mtu == if_getmtu(ifp))
+			break;
+		if (sc->sc_flags & (AXGE_FLAG_178A | AXGE_FLAG_179) &&
+		    ifr->ifr_mtu > AXGE_179_MTU_MAX)
+			error = EINVAL;
+		else if (sc->sc_flags & AXGE_FLAG_179A &&
+		    ifr->ifr_mtu > AXGE_179A_MTU_MAX)
+			error = EINVAL;
+		else if (ifr->ifr_mtu > AXGE_RXPKT_MAX_LEN - ETHER_HDR_LEN)
+			error = EINVAL;
+		else {
+			AXGE_LOCK(sc);
+			if_setmtu(ifp, ifr->ifr_mtu);
+			if (if_getdrvflags(ifp) & IFF_DRV_RUNNING) {
+				if_setdrvflagbits(ifp, 0, IFF_DRV_RUNNING);
+				reinit++;
+			}
+			AXGE_UNLOCK(sc);
+		}
+		break;
+	default:
 		error = uether_ioctl(ifp, cmd, data);
+	}
+
+	if (reinit > 0)
+		uether_init(ue);
 
 	return (error);
 }
@@ -1055,15 +1086,18 @@ axge_rxeof(struct usb_ether *ue, struct usb_page_cache *pc, unsigned offset,
     unsigned len, uint32_t status)
 {
 	if_t ifp;
-	struct mbuf *m;
+	struct mbuf *m, *mb;
+	int tlen;
 
 	ifp = ue->ue_ifp;
-	if (len < ETHER_HDR_LEN || len > MCLBYTES - ETHER_ALIGN) {
+	if (len < ETHER_HDR_LEN || len > AXGE_RXPKT_MAX_LEN) {
 		if_inc_counter(ifp, IFCOUNTER_IERRORS, 1);
 		return;
 	}
 
-	if (len > MHLEN - ETHER_ALIGN)
+	if (len > MCLBYTES - ETHER_ALIGN) {
+		m = m_getm2(NULL, len + ETHER_ALIGN, M_NOWAIT, MT_DATA, M_PKTHDR);
+	} else if (len > MHLEN - ETHER_ALIGN)
 		m = m_getcl(M_NOWAIT, MT_DATA, M_PKTHDR);
 	else
 		m = m_gethdr(M_NOWAIT, MT_DATA);
@@ -1071,11 +1105,21 @@ axge_rxeof(struct usb_ether *ue, struct usb_page_cache *pc, unsigned offset,
 		if_inc_counter(ifp, IFCOUNTER_IQDROPS, 1);
 		return;
 	}
+
 	m->m_pkthdr.rcvif = ifp;
-	m->m_len = m->m_pkthdr.len = len;
+	m->m_pkthdr.len = len;
 	m->m_data += ETHER_ALIGN;
 
-	usbd_copy_out(pc, offset, mtod(m, uint8_t *), len);
+	for (mb = m; len > 0; mb = mb->m_next) {
+		tlen = MIN(len, M_TRAILINGSPACE(mb));
+
+		usbd_copy_out(pc, offset, mtod(mb, uint8_t *), tlen);
+
+		mb->m_len = tlen;
+
+		offset += tlen;
+		len -= tlen;
+	}
 
 	if ((if_getcapenable(ifp) & IFCAP_RXCSUM) != 0) {
 		if ((status & AXGE_RX_L3_CSUM_ERR) == 0 &&

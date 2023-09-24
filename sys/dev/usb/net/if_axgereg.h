@@ -87,6 +87,10 @@
 #define	MSR_TFC				0x0020
 #define	MSR_RE				0x0100
 #define	MSR_PS				0x0200
+#define	MSR_JE				0x8040
+
+#define	AXGE_179_MTU_MAX	4 * 1024	/* AX88178A/179 */
+#define	AXGE_179A_MTU_MAX	9 * 1024	/* AX88179A */
 
 /* Monitor mode status register */
 #define	AXGE_MMSR			0x24
@@ -201,6 +205,7 @@ struct axge_frame_rxhdr {
 #define	AXGE_RXBYTES(x)		(((x) & AXGE_RX_LEN_MASK) >> AXGE_RX_LEN_SHIFT)
 #define	AXGE_RX_ERR(x)		\
 	    ((x) & (AXGE_RX_CRC_ERR | AXGE_RX_MII_ERR | AXGE_RX_DROP_PKT))
+#define	AXGE_RXPKT_MAX_LEN	AXGE_RXBYTES(AXGE_RX_LEN_MASK)
 
 struct axge_softc {
 	struct usb_ether	sc_ue;
