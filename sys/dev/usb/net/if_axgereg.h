@@ -177,6 +177,8 @@ struct axge_frame_txhdr {
 #define	AXGE_TXPKTHDR_SIZE	sizeof(struct axge_frame_txhdr)
 #define	AXGE_TXPKT_SIZE(m)	(AXGE_TXPKTHDR_SIZE + m->m_pkthdr.len)
 
+#define	AXGE_TSO_MAX	(AXGE_WR_BUFSZ - AXGE_TXPKTHDR_SIZE)
+
 #define	AXGE_PHY_ADDR		3
 
 struct axge_frame_rxhdr {

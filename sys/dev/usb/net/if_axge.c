@@ -141,7 +141,8 @@ static void	axge_csum_cfg(struct usb_ether *);
 
 #define	AXGE_CSUM_FEATURES	(CSUM_IP | CSUM_TCP | CSUM_UDP)
 #define	AXGE_CAP		\
-	    IFCAP_VLAN_MTU | IFCAP_TXCSUM | IFCAP_RXCSUM | IFCAP_JUMBO_MTU
+	    IFCAP_VLAN_MTU | IFCAP_TXCSUM | IFCAP_RXCSUM | IFCAP_JUMBO_MTU | \
+	    IFCAP_TSO
 #define	AXGE_CAP_ENABLE	\
 	    IFCAP_VLAN_MTU | IFCAP_TXCSUM | IFCAP_RXCSUM
 
@@ -488,6 +489,7 @@ axge_attach_post_sub(struct usb_ether *ue)
 	if_setcapabilitiesbit(ifp, AXGE_CAP, 0);
 	if_sethwassist(ifp, AXGE_CSUM_FEATURES);
 	if_setcapenable(ifp, AXGE_CAP_ENABLE);
+	if_sethwtsomax(ifp, AXGE_TSO_MAX);
 
 	bus_topo_lock();
 	error = mii_attach(ue->ue_dev, &ue->ue_miibus, ifp,
@@ -716,11 +718,18 @@ tr_setup:
 			pkt_len = m->m_pkthdr.len;
 
 			txhdr.mss = 0;
+			if ((if_getcapenable(ifp) & IFCAP_TSO) != 0 &&
+			    (m->m_pkthdr.csum_flags & CSUM_TSO) != 0 &&
+			    m->m_pkthdr.tso_segsz != 0) {
+				txhdr.mss = m->m_pkthdr.tso_segsz & AXGE_MSS_MASK;
+			}
+
 			txhdr.len = AXGE_TXBYTES(pkt_len);
 			if ((if_getcapenable(ifp) & IFCAP_TXCSUM) != 0 &&
 			    (m->m_pkthdr.csum_flags & AXGE_CSUM_FEATURES) == 0)
 				txhdr.len |= AXGE_CSUM_DISABLE;
 
+			txhdr.mss = htole32(txhdr.mss);
 			txhdr.len = htole32(txhdr.len);
 
 			usbd_copy_in(pc, pos, &txhdr, AXGE_TXPKTHDR_SIZE);
@@ -961,14 +970,31 @@ axge_ioctl(if_t ifp, u_long cmd, caddr_t data)
 			if_togglecapenable(ifp, IFCAP_TXCSUM);
 			if ((if_getcapenable(ifp) & IFCAP_TXCSUM) != 0)
 				if_sethwassistbits(ifp, AXGE_CSUM_FEATURES, 0);
-			else
-				if_sethwassistbits(ifp, 0, AXGE_CSUM_FEATURES);
+			else {
+				if_setcapenablebit(ifp, 0, IFCAP_TSO);
+				if_sethwassistbits(ifp, 0, AXGE_CSUM_FEATURES | CSUM_TSO);
+			}
 			reinit++;
 		}
 		if ((mask & IFCAP_RXCSUM) != 0 &&
 		    (if_getcapabilities(ifp) & IFCAP_RXCSUM) != 0) {
 			if_togglecapenable(ifp, IFCAP_RXCSUM);
 			reinit++;
+		}
+		if ((mask & IFCAP_TSO) != 0 &&
+		    (if_getcapabilities(ifp) & IFCAP_TSO) != 0) {
+			if_togglecapenable(ifp, IFCAP_TSO);
+			if ((if_getcapenable(ifp) & IFCAP_TSO) != 0) {
+				if ((if_getcapenable(ifp) & IFCAP_TXCSUM) != 0) {
+					if_sethwassistbits(ifp, CSUM_TSO, 0);
+				} else {
+					if_setcapenablebit(ifp, 0, IFCAP_TSO);
+					if_sethwassistbits(ifp, 0, CSUM_TSO);
+					if_printf(ifp, "tso requires txcsum\n");
+					error = EAGAIN;
+				}
+			} else
+				if_sethwassistbits(ifp, 0, CSUM_TSO);
 		}
 		if (reinit > 0 && if_getdrvflags(ifp) & IFF_DRV_RUNNING)
 			if_setdrvflagbits(ifp, 0, IFF_DRV_RUNNING);
