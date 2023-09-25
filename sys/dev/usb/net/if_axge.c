@@ -155,27 +155,6 @@ SYSCTL_INT(_hw_usb_axge, OID_AUTO, debug, CTLFLAG_RWTUN, &axge_debug, 0,
     "Debug level");
 #endif
 
-static const struct usb_config axge_config[AXGE_N_TRANSFER] = {
-	[AXGE_BULK_DT_WR] = {
-		.type = UE_BULK,
-		.endpoint = UE_ADDR_ANY,
-		.direction = UE_DIR_OUT,
-		.bufsize = AXGE_WR_BUFSZ,
-		.flags = {.pipe_bof = 1,.force_short_xfer = 1,},
-		.callback = axge_bulk_write_callback,
-		.timeout = 10000,	/* 10 seconds */
-	},
-	[AXGE_BULK_DT_RD] = {
-		.type = UE_BULK,
-		.endpoint = UE_ADDR_ANY,
-		.direction = UE_DIR_IN,
-		.bufsize = AXGE_RD_BUFSZ,
-		.flags = {.pipe_bof = 1,.short_xfer_ok = 1,},
-		.callback = axge_bulk_read_callback,
-		.timeout = 0,		/* no timeout */
-	},
-};
-
 static device_method_t axge_methods[] = {
 	/* Device interface. */
 	DEVMETHOD(device_probe,		axge_probe),
@@ -569,8 +548,10 @@ axge_attach(device_t dev)
 	struct usb_attach_arg *uaa;
 	struct axge_softc *sc;
 	struct usb_ether *ue;
+	struct usb_config axge_config_tx[AXGE_MAX_TX];
+	struct usb_config axge_config_rx[AXGE_MAX_RX];
 	uint8_t iface_index;
-	int error;
+	int i, error;
 
 	uaa = device_get_ivars(dev);
 	sc = device_get_softc(dev);
@@ -582,10 +563,43 @@ axge_attach(device_t dev)
 	sc->sc_flags = USB_GET_DRIVER_INFO(uaa);
 
 	iface_index = AXGE_IFACE_IDX;
-	error = usbd_transfer_setup(uaa->device, &iface_index,
-	    sc->sc_xfer, axge_config, AXGE_N_TRANSFER, sc, &sc->sc_mtx);
+
+	for (i = 0; i < AXGE_MAX_TX; i++)
+		axge_config_tx[i] = (struct usb_config) {
+			.type = UE_BULK,
+			.endpoint = UE_ADDR_ANY,
+			.direction = UE_DIR_OUT,
+			.bufsize = AXGE_WR_BUFSZ,
+			.flags = {.pipe_bof = 1,.force_short_xfer = 1,},
+			.callback = axge_bulk_write_callback,
+			.timeout = 10000,	/* 10 seconds */
+		};
+
+	error = usbd_transfer_setup(uaa->device, &iface_index, sc->sc_tx_xfer,
+	    axge_config_tx, AXGE_MAX_TX, sc, &sc->sc_mtx);
+
 	if (error) {
-		device_printf(dev, "allocating USB transfers failed\n");
+		device_printf(dev, "allocating USB TX transfers failed\n");
+		mtx_destroy(&sc->sc_mtx);
+		return (ENXIO);
+	}
+
+	for (i = 0; i < AXGE_MAX_RX; i++)
+		axge_config_rx[i] = (struct usb_config) {
+			.type = UE_BULK,
+			.endpoint = UE_ADDR_ANY,
+			.direction = UE_DIR_IN,
+			.bufsize = AXGE_RD_BUFSZ,
+			.flags = {.pipe_bof = 1,.short_xfer_ok = 1,},
+			.callback = axge_bulk_read_callback,
+			.timeout = 0,		/* no timeout */
+		};
+
+	error = usbd_transfer_setup(uaa->device, &iface_index, sc->sc_rx_xfer,
+	    axge_config_rx, AXGE_MAX_RX, sc, &sc->sc_mtx);
+
+	if (error) {
+		device_printf(dev, "allocating USB RX transfers failed\n");
 		mtx_destroy(&sc->sc_mtx);
 		return (ENXIO);
 	}
@@ -637,7 +651,8 @@ axge_detach(device_t dev)
 		axge_write_cmd_2(sc, AXGE_ACCESS_MAC, 2, AXGE_RCR, 0);
 		AXGE_UNLOCK(sc);
 	}
-	usbd_transfer_unsetup(sc->sc_xfer, AXGE_N_TRANSFER);
+	usbd_transfer_unsetup(sc->sc_tx_xfer, AXGE_MAX_TX);
+	usbd_transfer_unsetup(sc->sc_rx_xfer, AXGE_MAX_RX);
 	uether_ifdetach(ue);
 	mtx_destroy(&sc->sc_mtx);
 
@@ -858,13 +873,16 @@ static void
 axge_start(struct usb_ether *ue)
 {
 	struct axge_softc *sc;
+	int i;
 
 	sc = uether_getsc(ue);
 	/*
 	 * Start the USB transfers, if not already started.
 	 */
-	usbd_transfer_start(sc->sc_xfer[AXGE_BULK_DT_RD]);
-	usbd_transfer_start(sc->sc_xfer[AXGE_BULK_DT_WR]);
+	for (i = 0; i < AXGE_MAX_TX; i++)
+		usbd_transfer_start(sc->sc_tx_xfer[i]);
+	for (i = 0; i < AXGE_MAX_RX; i++)
+		usbd_transfer_start(sc->sc_rx_xfer[i]);
 }
 
 static void
@@ -872,6 +890,7 @@ axge_init(struct usb_ether *ue)
 {
 	struct axge_softc *sc;
 	if_t ifp;
+	int i;
 
 	sc = uether_getsc(ue);
 	ifp = uether_getifp(ue);
@@ -914,7 +933,8 @@ axge_init(struct usb_ether *ue)
 	axge_write_cmd_2(sc, AXGE_ACCESS_MAC, 2, AXGE_MSR, MSR_GM | MSR_FD |
 	    MSR_RFC | MSR_TFC | MSR_RE);
 
-	usbd_xfer_set_stall(sc->sc_xfer[AXGE_BULK_DT_WR]);
+	for (i = 0; i < AXGE_MAX_TX; i++)
+		usbd_xfer_set_stall(sc->sc_tx_xfer[i]);
 
 	if_setdrvflagbits(ifp, IFF_DRV_RUNNING, 0);
 	/* Switch to selected media. */
@@ -927,6 +947,7 @@ axge_stop(struct usb_ether *ue)
 	struct axge_softc *sc;
 	if_t ifp;
 	uint16_t val;
+	int i;
 
 	sc = uether_getsc(ue);
 	ifp = uether_getifp(ue);
@@ -944,8 +965,10 @@ axge_stop(struct usb_ether *ue)
 	/*
 	 * Stop all the transfers, if not already stopped:
 	 */
-	usbd_transfer_stop(sc->sc_xfer[AXGE_BULK_DT_WR]);
-	usbd_transfer_stop(sc->sc_xfer[AXGE_BULK_DT_RD]);
+	for (i = 0; i < AXGE_MAX_TX; i++)
+		usbd_transfer_stop(sc->sc_tx_xfer[i]);
+	for (i = 0; i < AXGE_MAX_RX; i++)
+		usbd_transfer_stop(sc->sc_rx_xfer[i]);
 }
 
 static int

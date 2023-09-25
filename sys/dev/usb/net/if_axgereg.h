@@ -156,11 +156,13 @@
 enum {
 	AXGE_BULK_DT_WR,
 	AXGE_BULK_DT_RD,
-	AXGE_N_TRANSFER,
 };
 
-#define	AXGE_WR_BUFSZ	(16 * 1024)
-#define	AXGE_RD_BUFSZ	(48 * 1024)
+#define	AXGE_WR_BUFSZ		(16 * 1024)
+#define	AXGE_RD_BUFSZ		(48 * 1024)
+#define	AXGE_MAX_RX		10
+#define	AXGE_MAX_TX		4
+#define	AXGE_N_TRANSFER		AXGE_MAX_RX + AXGE_MAX_TX
 
 struct axge_frame_txhdr {
 	uint32_t		len;
@@ -212,7 +214,8 @@ struct axge_frame_rxhdr {
 struct axge_softc {
 	struct usb_ether	sc_ue;
 	struct mtx		sc_mtx;
-	struct usb_xfer		*sc_xfer[AXGE_N_TRANSFER];
+	struct usb_xfer		*sc_tx_xfer[AXGE_MAX_TX];
+	struct usb_xfer		*sc_rx_xfer[AXGE_MAX_RX];
 
 	int			sc_flags;
 #define	AXGE_FLAG_LINK		0x0001	/* got a link */
